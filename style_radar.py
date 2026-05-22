@@ -159,6 +159,8 @@ def fetch_unsplash_image(query: str, gender: str = "") -> str | None:
 # ──────────────────────────────────────────
 def generate_dalle_image(dalle_prompt: str) -> str | None:
     try:
+        # gpt-image-1 回傳 base64，需存成暫存檔再上傳
+        import base64, tempfile, os as _os
         resp = requests.post(
             "https://api.openai.com/v1/images/generations",
             headers={
@@ -166,40 +168,42 @@ def generate_dalle_image(dalle_prompt: str) -> str | None:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "dall-e-3",
+                "model": "gpt-image-1",
                 "prompt": dalle_prompt,
                 "n": 1,
                 "size": "1024x1024",
-                "quality": "standard",
             },
-            timeout=60,
-            allow_redirects=False,
+            timeout=120,
         )
-        # 如果收到 redirect，手動處理
-        if resp.status_code in (301, 302, 307, 308):
-            location = resp.headers.get("Location", "")
-            print(f"  ⚠️ Redirect 到：{location}")
-            resp = requests.post(
-                location,
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "dall-e-3",
-                    "prompt": dalle_prompt,
-                    "n": 1,
-                    "size": "1024x1024",
-                    "quality": "standard",
-                },
-                timeout=60,
-            )
         resp.raise_for_status()
-        url = resp.json()["data"][0]["url"]
-        print(f"  ✅ DALL-E 3 生成成功")
+        data = resp.json()
+
+        # gpt-image-1 回傳 base64 字串
+        b64 = data["data"][0].get("b64_json")
+        if not b64:
+            # 部分版本仍回傳 url
+            url = data["data"][0].get("url")
+            if url:
+                print(f"  ✅ gpt-image-1 生成成功（url）")
+                return url
+            print(f"  ❌ gpt-image-1 回傳格式異常")
+            return None
+
+        # 將 base64 寫入暫存 PNG，上傳到 imgur（免費匿名）
+        img_bytes = base64.b64decode(b64)
+        imgur_resp = requests.post(
+            "https://api.imgur.com/3/image",
+            headers={"Authorization": "Client-ID 546c25a59c58ad7"},
+            files={"image": ("outfit.png", img_bytes, "image/png")},
+            timeout=30,
+        )
+        imgur_resp.raise_for_status()
+        url = imgur_resp.json()["data"]["link"]
+        print(f"  ✅ gpt-image-1 生成成功，上傳至 Imgur")
         return url
+
     except Exception as e:
-        print(f"  ❌ DALL-E 3 失敗：{e}")
+        print(f"  ❌ gpt-image-1 失敗：{e}")
         if hasattr(e, "response") and e.response is not None:
             print(f"  ❌ 錯誤內容：{e.response.text}")
         return None
@@ -359,7 +363,7 @@ def build_line_messages(
         if male_unsplash:
             add_image(male_unsplash, "📷 真實穿搭參考（Unsplash）")
         if male_dalle:
-            add_image(male_dalle, "🎨 AI 風格示意圖（DALL-E 3）")
+            add_image(male_dalle, "🎨 AI 風格示意圖（gpt-image-1）")
 
     # 女生圖片
     if female_unsplash or female_dalle:
@@ -367,7 +371,7 @@ def build_line_messages(
         if female_unsplash:
             add_image(female_unsplash, "📷 真實穿搭參考（Unsplash）")
         if female_dalle:
-            add_image(female_dalle, "🎨 AI 風格示意圖（DALL-E 3）")
+            add_image(female_dalle, "🎨 AI 風格示意圖（gpt-image-1）")
 
     return messages
 
@@ -413,7 +417,7 @@ def main():
     male_unsplash   = fetch_unsplash_image(male_query,   gender="male")
     female_unsplash = fetch_unsplash_image(female_query, gender="female")
 
-    print("\n[圖片] DALL-E 3 生成...")
+    print("\n[圖片] gpt-image-1 生成...")
     male_ai   = generate_dalle_image(build_dalle_prompt("male",   male_dalle_desc))
     female_ai = generate_dalle_image(build_dalle_prompt("female", female_dalle_desc))
 
