@@ -24,7 +24,7 @@ LINE_CHANNEL_TOKEN  = os.environ["LINE_CHANNEL_TOKEN"]
 LINE_USER_ID        = os.environ["LINE_USER_ID"]
 UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
 OPENAI_API_KEY      = os.environ["OPENAI_API_KEY"]
-YOUTUBE_API_KEY     = os.environ.get("YOUTUBE_API_KEY", "")  # 來源 C
+YOUTUBE_API_KEY     = os.environ["YOUTUBE_API_KEY"]#os.environ.get("YOUTUBE_API_KEY", "")  # 來源 C
 
 # YouTube 頻道名稱（用搜尋方式找 channelId，不需要手動維護 ID）
 YOUTUBE_CHANNELS = [
