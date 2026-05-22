@@ -33,27 +33,111 @@ HEADERS = {
 }
 
 FASHION_RSS = [
-    ("Hypebeast",    "https://hypebeast.com/feed"),
-    ("Highsnobiety", "https://www.highsnobiety.com/feed/"),
-    ("GQ",           "https://www.gq.com/feed/rss"),
-    ("Put This On",  "https://putthison.com/feed/"),
+    # ===== 男生 =====
+    ("plain-me Blog", "https://www.plain-me.com/blogs/blog.atom"),
+    ("OVERDOPE", "https://overdope.com/feed"),
+    ("COOL-STYLE", "https://cool-style.com.tw/feed"),
+    ("FACY MEN", "https://facy.jp/feed"),
+    ("Mastered JP", "https://mastered.jp/feed/"),
+
+    # ===== 女生 =====
+    ("Marie Claire TW", "https://www.marieclaire.com.tw/rss"),
+    ("ELLE Taiwan", "https://www.elle.com/tw/rss"),
+    ("VOGUE Taiwan", "https://www.vogue.com.tw/rss"),
+    ("PopDaily 波波黛莉", "https://www.popdaily.com.tw/rss"),
+    ("BEAUTY美人圈", "https://www.beauty321.com/rss"),
+    ("Cosmopolitan TW", "https://www.cosmopolitan.com/tw/rss"),
+
+    # ===== 韓系 / 日系 =====
+    ("FACY", "https://facy.jp/feed"),
+    ("MERY JP", "https://mery.jp/feed"),
+    ("Eyesmag KR", "https://eyesmag.com/feed"),
+
+    # ===== 生活美感 =====
+    ("Shopping Design", "https://www.shoppingdesign.com.tw/rss"),
+    ("every little d", "https://everylittled.com/feed"),
 ]
 
 STYLE_PREFERENCE = """
+核心風格：
 - clean fit
-- relaxed fit / 鬆弛感
-- 亞洲比例
-- 韓系 / 日系
+- relaxed silhouette
+- effortless style
+- 亞洲男生比例優化
+- 韓系 + 日系混合
+- 都市機能簡約
+
+配色偏好：
+- 黑
+- 灰
+- 白
+- 深藍
+- 大地色
+- 低彩度
+
+喜歡單品：
 - NB 復古鞋
-- 灰白黑色系
-- 不喜歡：浮誇高街、過度 logo
+- 寬鬆西裝褲
+- 直筒卡其褲
+- 短版外套
+- clean sneakers
+- 尼龍機能材質
+- 襯衫疊穿
+- 針織
+
+輪廓偏好：
+- 上寬下直
+- 不貼身
+- 有空氣感
+- 鬆弛感
+- 日系垂墜感
+
+避免：
+- 過度 logo
+- 浮誇高街
+- oversize 太極端
+- 全身精品感
+- 緊身褲
+- 美式健身風
+- 螢光色
+- heavy streetwear
+
+風格參考：
+- 韓國街頭上班族
+- 東京選物店店員
+- plain-me
+- niko and...
+- muji casual
+- auralee / graphpaper 氛圍
 """
 
 FALLBACK_QUERIES = {
-    "male":   ["minimal menswear outfit", "clean fit streetwear", "korean fashion men"],
-    "female": ["minimal womenswear outfit", "clean fit women fashion", "korean fashion women"],
-}
+    "male": [
+        "japanese minimal menswear",
+        "korean relaxed fit men",
+        "asian street casual men",
+        "urban clean fit men",
+        "tokyo select shop style",
+        "muji menswear style",
+        "plain me style men",
+        "nb 990 outfit men",
+        "wide pants menswear asian",
+        "city boy style japan"
+    ],
 
+    "female": [
+        "korean minimal women outfit",
+        "japanese casual women fashion",
+        "clean girl asian fashion",
+        "relaxed silhouette women",
+        "tokyo cafe girl outfit",
+        "muji casual women style",
+        "low tone korean outfit",
+        "grey white black women outfit",
+        "soft minimal fashion women",
+        "urban effortless women style"
+    ]
+}
 
 # ──────────────────────────────────────────
 # 來源 A：Pinterest CSV
