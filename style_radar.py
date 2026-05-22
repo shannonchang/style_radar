@@ -2,6 +2,7 @@
 AI 穿搭靈感雷達 - 每週自動推播
 來源 A：Pinterest CSV（手動匯出，放進 data/pinterest.csv）
 來源 B：穿搭媒體 RSS（Hypebeast、Highsnobiety 等）
+圖片：Unsplash API
 分析：Claude API
 推播：Line Messaging API
 """
@@ -17,9 +18,10 @@ from pathlib import Path
 # ──────────────────────────────────────────
 # 設定區
 # ──────────────────────────────────────────
-CLAUDE_API_KEY     = os.environ["ANTHROPIC_API_KEY"]
-LINE_CHANNEL_TOKEN = os.environ["LINE_CHANNEL_TOKEN"]
-LINE_USER_ID       = os.environ["LINE_USER_ID"]
+CLAUDE_API_KEY      = os.environ["ANTHROPIC_API_KEY"]
+LINE_CHANNEL_TOKEN  = os.environ["LINE_CHANNEL_TOKEN"]
+LINE_USER_ID        = os.environ["LINE_USER_ID"]
+UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
 
 HEADERS = {
     "User-Agent": (
@@ -30,11 +32,11 @@ HEADERS = {
 }
 
 FASHION_RSS = [
-    ("Hypebeast",       "https://hypebeast.com/feed"),
-    ("Highsnobiety",    "https://www.highsnobiety.com/feed/"),
-    ("GQ",              "https://www.gq.com/feed/rss"),
-    ("Put This On",     "https://putthison.com/feed/"),
-    ("The Sartorialist","https://www.thesartorialist.com/feed/"),
+    ("Hypebeast",        "https://hypebeast.com/feed"),
+    ("Highsnobiety",     "https://www.highsnobiety.com/feed/"),
+    ("GQ",               "https://www.gq.com/feed/rss"),
+    ("Put This On",      "https://putthison.com/feed/"),
+    ("The Sartorialist", "https://www.thesartorialist.com/feed/"),
 ]
 
 STYLE_PREFERENCE = """
@@ -94,12 +96,7 @@ def fetch_rss(name: str, url: str, max_items: int = 5) -> list[dict]:
                 item.findtext("description") or
                 item.findtext("atom:summary", namespaces=ns) or ""
             ).strip()[:200]
-
-            results.append({
-                "source": name,
-                "title":  title,
-                "desc":   desc,
-            })
+            results.append({"source": name, "title": title, "desc": desc})
 
         print(f"  ✅ {name}：{len(results)} 篇")
         return results
@@ -112,13 +109,45 @@ def fetch_rss(name: str, url: str, max_items: int = 5) -> list[dict]:
 def collect_fashion_rss() -> list[dict]:
     all_items = []
     for name, url in FASHION_RSS:
-        items = fetch_rss(name, url)
-        all_items.extend(items)
+        all_items.extend(fetch_rss(name, url))
     return all_items
 
 
 # ──────────────────────────────────────────
-# Claude 分析
+# Unsplash 圖片搜尋
+# ──────────────────────────────────────────
+def fetch_unsplash_image(query: str) -> str | None:
+    """搜尋 Unsplash，回傳圖片 URL（適合 Line 傳送的尺寸）"""
+    try:
+        resp = requests.get(
+            "https://api.unsplash.com/search/photos",
+            headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+            params={
+                "query": query,
+                "per_page": 5,
+                "orientation": "portrait",  # 直向圖，手機看比較好
+                "content_filter": "high",   # 過濾不適合內容
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            print(f"  ❌ Unsplash 搜尋「{query}」無結果")
+            return None
+
+        # 取第一張，用 regular 尺寸（約 1080px，適合手機）
+        url = results[0]["urls"]["regular"]
+        print(f"  ✅ Unsplash 搜尋「{query}」→ 取得圖片")
+        return url
+
+    except Exception as e:
+        print(f"  ❌ Unsplash 失敗：{e}")
+        return None
+
+
+# ──────────────────────────────────────────
+# Claude 分析（同時產出圖片搜尋關鍵字）
 # ──────────────────────────────────────────
 def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
     sections = []
@@ -148,12 +177,10 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
 （3 個本週最明顯的趨勢關鍵字，男女通用）
 
 👨 男生穿搭建議
-（根據本週資料，給一個具體的男生穿搭方向，
-符合 clean fit / 亞洲比例，越實際越好）
+（具體的男生穿搭方向，符合 clean fit / 亞洲比例）
 
 👩 女生穿搭建議
-（根據本週資料，給一個具體的女生穿搭方向，
-同樣偏向簡約、亞洲比例，避免過度浮誇）
+（具體的女生穿搭方向，偏向簡約、亞洲比例）
 
 📰 值得關注
 （從媒體文章挑 1 篇最值得看的，一句話說原因）
@@ -161,12 +188,38 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
 📐 本週色系傾向
 （一句話）
 
+---
+最後在回答最末尾，另起一行加上以下兩行（純英文關鍵字，給圖片搜尋用）：
+MALE_QUERY: [3-5個英文關鍵字，描述男生穿搭，例如: korean minimal menswear clean fit]
+FEMALE_QUERY: [3-5個英文關鍵字，描述女生穿搭，例如: minimal asian womenswear neutral]
+
 語氣像朋友，不要像 AI 報告，200 字以內。"""
 
 
-def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
+def parse_analysis(raw: str) -> tuple[str, str, str]:
+    """拆出主要分析文字、男生圖片關鍵字、女生圖片關鍵字"""
+    male_query  = "korean minimal menswear clean fit"
+    female_query = "minimal asian womenswear neutral outfit"
+    main_text   = raw
+
+    for line in raw.splitlines():
+        if line.startswith("MALE_QUERY:"):
+            male_query = line.replace("MALE_QUERY:", "").strip()
+        elif line.startswith("FEMALE_QUERY:"):
+            female_query = line.replace("FEMALE_QUERY:", "").strip()
+
+    # 移除 query 行，只保留給用戶看的文字
+    main_text = "\n".join(
+        line for line in raw.splitlines()
+        if not line.startswith("MALE_QUERY:") and not line.startswith("FEMALE_QUERY:")
+    ).strip()
+
+    return main_text, male_query, female_query
+
+
+def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> tuple[str, str, str]:
     if not pinterest_pins and not rss_items:
-        return "本週兩個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾，以及網路連線是否正常。"
+        return "本週兩個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾。", "", ""
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -177,19 +230,26 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> st
         },
         json={
             "model": "claude-sonnet-4-20250514",
-            "max_tokens": 500,
+            "max_tokens": 600,
             "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items)}],
         },
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()["content"][0]["text"]
+    raw = resp.json()["content"][0]["text"]
+    return parse_analysis(raw)
 
 
 # ──────────────────────────────────────────
-# Line 推播
+# Line 推播（文字 + 圖片）
 # ──────────────────────────────────────────
-def send_line(message: str, pinterest_count: int, rss_count: int):
+def build_line_messages(
+    analysis: str,
+    pinterest_count: int,
+    rss_count: int,
+    male_img_url: str | None,
+    female_img_url: str | None,
+) -> list[dict]:
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%m/%d")
     header = (
         f"👗 穿搭雷達週報 {today}\n"
@@ -197,19 +257,51 @@ def send_line(message: str, pinterest_count: int, rss_count: int):
         f"{'─' * 20}\n\n"
     )
 
-    resp = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers={
-            "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "to": LINE_USER_ID,
-            "messages": [{"type": "text", "text": header + message}],
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
+    messages = [
+        {"type": "text", "text": header + analysis}
+    ]
+
+    # 男生參考圖
+    if male_img_url:
+        messages.append({
+            "type": "image",
+            "originalContentUrl": male_img_url,
+            "previewImageUrl":    male_img_url,
+        })
+        messages.append({
+            "type": "text",
+            "text": "👆 男生穿搭參考圖（via Unsplash）"
+        })
+
+    # 女生參考圖
+    if female_img_url:
+        messages.append({
+            "type": "image",
+            "originalContentUrl": female_img_url,
+            "previewImageUrl":    female_img_url,
+        })
+        messages.append({
+            "type": "text",
+            "text": "👆 女生穿搭參考圖（via Unsplash）"
+        })
+
+    return messages
+
+
+def send_line(messages: list[dict]):
+    # Line 單次最多 5 則訊息
+    chunks = [messages[i:i+5] for i in range(0, len(messages), 5)]
+    for chunk in chunks:
+        resp = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={"to": LINE_USER_ID, "messages": chunk},
+            timeout=15,
+        )
+        resp.raise_for_status()
     print("Line 推播成功")
 
 
@@ -228,11 +320,20 @@ def main():
     print(f"\n合計：Pinterest {len(pinterest_pins)} 筆｜媒體 {len(rss_items)} 篇")
 
     print("\nClaude 分析中...")
-    analysis = analyze_with_claude(pinterest_pins, rss_items)
+    analysis, male_query, female_query = analyze_with_claude(pinterest_pins, rss_items)
     print(f"\n{analysis}")
+    print(f"\n男生圖片關鍵字：{male_query}")
+    print(f"女生圖片關鍵字：{female_query}")
+
+    print("\nUnsplash 搜尋參考圖...")
+    male_img   = fetch_unsplash_image(male_query)   if male_query   else None
+    female_img = fetch_unsplash_image(female_query) if female_query else None
 
     print("\n推播到 Line...")
-    send_line(analysis, len(pinterest_pins), len(rss_items))
+    messages = build_line_messages(
+        analysis, len(pinterest_pins), len(rss_items), male_img, female_img
+    )
+    send_line(messages)
 
     print("\n=== 完成 ===")
 
