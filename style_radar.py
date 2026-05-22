@@ -32,11 +32,10 @@ HEADERS = {
 }
 
 FASHION_RSS = [
-    ("Hypebeast",        "https://hypebeast.com/feed"),
-    ("Highsnobiety",     "https://www.highsnobiety.com/feed/"),
-    ("GQ",               "https://www.gq.com/feed/rss"),
-    ("Put This On",      "https://putthison.com/feed/"),
-    ("The Sartorialist", "https://www.thesartorialist.com/feed/"),
+    ("Hypebeast",     "https://hypebeast.com/feed"),
+    ("Highsnobiety",  "https://www.highsnobiety.com/feed/"),
+    ("GQ",            "https://www.gq.com/feed/rss"),
+    ("Put This On",   "https://putthison.com/feed/"),
 ]
 
 STYLE_PREFERENCE = """
@@ -116,34 +115,44 @@ def collect_fashion_rss() -> list[dict]:
 # ──────────────────────────────────────────
 # Unsplash 圖片搜尋
 # ──────────────────────────────────────────
-def fetch_unsplash_image(query: str) -> str | None:
-    """搜尋 Unsplash，回傳圖片 URL（適合 Line 傳送的尺寸）"""
-    try:
-        resp = requests.get(
-            "https://api.unsplash.com/search/photos",
-            headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
-            params={
-                "query": query,
-                "per_page": 5,
-                "orientation": "portrait",  # 直向圖，手機看比較好
-                "content_filter": "high",   # 過濾不適合內容
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        if not results:
-            print(f"  ❌ Unsplash 搜尋「{query}」無結果")
-            return None
+# Unsplash 搜尋失敗時的備用關鍵字
+FALLBACK_QUERIES = {
+    "male":   ["minimal menswear outfit", "clean fit streetwear", "korean fashion men"],
+    "female": ["minimal womenswear outfit", "clean fit women fashion", "korean fashion women"],
+}
 
-        # 取第一張，用 regular 尺寸（約 1080px，適合手機）
-        url = results[0]["urls"]["regular"]
-        print(f"  ✅ Unsplash 搜尋「{query}」→ 取得圖片")
-        return url
+def fetch_unsplash_image(query: str, gender: str = "") -> str | None:
+    """搜尋 Unsplash，無結果時自動嘗試備用關鍵字"""
+    queries = [query]
+    if gender in FALLBACK_QUERIES:
+        queries += FALLBACK_QUERIES[gender]
 
-    except Exception as e:
-        print(f"  ❌ Unsplash 失敗：{e}")
-        return None
+    for q in queries:
+        try:
+            resp = requests.get(
+                "https://api.unsplash.com/search/photos",
+                headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                params={
+                    "query": q,
+                    "per_page": 5,
+                    "orientation": "portrait",
+                    "content_filter": "high",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if results:
+                url = results[0]["urls"]["regular"]
+                print(f"  ✅ Unsplash 搜尋「{q}」→ 取得圖片")
+                return url
+            print(f"  ⚠️ 搜尋「{q}」無結果，嘗試備用...")
+        except Exception as e:
+            print(f"  ❌ Unsplash 失敗：{e}")
+            break
+
+    print(f"  ❌ 所有關鍵字都無結果")
+    return None
 
 
 # ──────────────────────────────────────────
@@ -326,8 +335,8 @@ def main():
     print(f"女生圖片關鍵字：{female_query}")
 
     print("\nUnsplash 搜尋參考圖...")
-    male_img   = fetch_unsplash_image(male_query)   if male_query   else None
-    female_img = fetch_unsplash_image(female_query) if female_query else None
+    male_img   = fetch_unsplash_image(male_query,   gender="male")   if male_query   else None
+    female_img = fetch_unsplash_image(female_query, gender="female") if female_query else None
 
     print("\n推播到 Line...")
     messages = build_line_messages(
