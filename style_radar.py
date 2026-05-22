@@ -134,29 +134,34 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
 
     combined = "\n\n".join(sections) if sections else "（本週沒有任何資料）"
 
-    return f"""你是亞洲男生穿搭顧問。
+    return f"""你是亞洲穿搭顧問，同時熟悉男生和女生的穿搭趨勢。
 
-我的風格偏好：
+我的風格偏好（男生視角）：
 {STYLE_PREFERENCE}
 
 以下是這週的穿搭資料：
 {combined}
 
-請根據我的風格偏好，用繁體中文回答，格式如下：
+請用繁體中文回答，格式如下：
 
 🎯 本週風格信號
-（3 個符合我偏好的關鍵字）
+（3 個本週最明顯的趨勢關鍵字，男女通用）
+
+👨 男生穿搭建議
+（根據本週資料，給一個具體的男生穿搭方向，
+符合 clean fit / 亞洲比例，越實際越好）
+
+👩 女生穿搭建議
+（根據本週資料，給一個具體的女生穿搭方向，
+同樣偏向簡約、亞洲比例，避免過度浮誇）
 
 📰 值得關注
-（從媒體文章挑 1～2 個最值得看的，說明原因）
+（從媒體文章挑 1 篇最值得看的，一句話說原因）
 
 📐 本週色系傾向
 （一句話）
 
-💡 下週可以嘗試
-（一個具體穿搭方向）
-
-語氣像朋友，不要像 AI 報告，150 字以內。"""
+語氣像朋友，不要像 AI 報告，200 字以內。"""
 
 
 def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
