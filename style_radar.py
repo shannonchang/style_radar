@@ -2,7 +2,8 @@
 AI 穿搭靈感雷達 - 每週自動推播
 來源 A：Pinterest CSV（手動匯出，放進 data/pinterest.csv）
 來源 B：穿搭媒體 RSS（Hypebeast、Highsnobiety 等）
-圖片：Unsplash API（真實照）+ DALL-E 3（AI 生成）
+來源 C：YouTube Data API（Dappei / Plain-me / MBM 等台灣頻道）
+圖片：Unsplash API（真實照）+ gpt-image-1（AI 生成）
 分析：Claude API
 推播：Line Messaging API
 """
@@ -23,6 +24,16 @@ LINE_CHANNEL_TOKEN  = os.environ["LINE_CHANNEL_TOKEN"]
 LINE_USER_ID        = os.environ["LINE_USER_ID"]
 UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
 OPENAI_API_KEY      = os.environ["OPENAI_API_KEY"]
+YOUTUBE_API_KEY     = os.environ.get("YOUTUBE_API_KEY", "")  # 來源 C
+
+# YouTube 頻道名稱（用搜尋方式找 channelId，不需要手動維護 ID）
+YOUTUBE_CHANNELS = [
+    "Dappei 搭配",   # 台灣最大穿搭社群
+    "Plain-me",      # 台灣選物品牌
+    "MBM",           # 台灣男生穿搭
+    "Kevin老師",     # 穿搭教學
+    "Lo-Fi House",   # 生活風格
+]
 
 HEADERS = {
     "User-Agent": (
@@ -187,6 +198,12 @@ def load_pinterest_csv() -> list[dict]:
         print("  Pinterest CSV 不存在，跳過")
         return []
 
+    # 超過 8 天未更新則警告
+    mtime = datetime.fromtimestamp(csv_path.stat().st_mtime, tz=timezone.utc)
+    age_days = (datetime.now(tz=timezone.utc) - mtime).days
+    if age_days > 8:
+        print(f"  ⚠️ Pinterest CSV 已 {age_days} 天未更新")
+
     pins = []
     with open(csv_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -200,6 +217,117 @@ def load_pinterest_csv() -> list[dict]:
 
     print(f"  讀到 {len(pins)} 筆")
     return pins
+
+
+# ──────────────────────────────────────────
+# 來源 C：YouTube Data API
+# ──────────────────────────────────────────
+def _get_channel_id(channel_name: str) -> str | None:
+    """用頻道名稱搜尋 channelId（消耗 ~100 quota）"""
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params={
+                "part": "snippet",
+                "q": channel_name,
+                "type": "channel",
+                "maxResults": 1,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if items:
+            return items[0]["snippet"]["channelId"]
+    except Exception as e:
+        print(f"  ❌ 搜尋頻道 {channel_name} 失敗：{e}")
+    return None
+
+
+def _get_uploads_playlist_id(channel_id: str) -> str | None:
+    """取得頻道的 uploads playlist ID（消耗 ~1 quota）"""
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/youtube/v3/channels",
+            params={
+                "part": "contentDetails",
+                "id": channel_id,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if items:
+            return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    except Exception as e:
+        print(f"  ❌ 取得 playlist 失敗：{e}")
+    return None
+
+
+def fetch_youtube_channel(channel_name: str, max_videos: int = 3) -> list[dict]:
+    """
+    抓取單一 YouTube 頻道的最新影片
+    每次呼叫約消耗 ~103 quota（search 100 + channels 1 + playlistItems 2）
+    6 個頻道每週一次 ≈ 618 quota，遠低於每日 10,000 上限
+    """
+    if not YOUTUBE_API_KEY:
+        return []
+
+    channel_id = _get_channel_id(channel_name)
+    if not channel_id:
+        return []
+
+    playlist_id = _get_uploads_playlist_id(channel_id)
+    if not playlist_id:
+        return []
+
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={
+                "part": "snippet",
+                "playlistId": playlist_id,
+                "maxResults": max_videos,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+
+        results = []
+        for item in items:
+            sn = item["snippet"]
+            title = sn.get("title", "").strip()
+            desc  = sn.get("description", "").strip()[:300]
+            video_id = sn.get("resourceId", {}).get("videoId", "")
+            results.append({
+                "source":   f"YouTube/{channel_name}",
+                "title":    title,
+                "desc":     desc,
+                "video_id": video_id,
+            })
+
+        print(f"  ✅ YouTube/{channel_name}：{len(results)} 支影片")
+        return results
+
+    except Exception as e:
+        print(f"  ❌ YouTube/{channel_name} playlist 失敗：{e}")
+        return []
+
+
+def collect_youtube_videos() -> list[dict]:
+    """抓取所有設定頻道的最新影片"""
+    if not YOUTUBE_API_KEY:
+        print("  ⚠️ YOUTUBE_API_KEY 未設定，跳過來源 C")
+        return []
+
+    all_videos = []
+    for channel_name in YOUTUBE_CHANNELS:
+        all_videos.extend(fetch_youtube_channel(channel_name))
+    return all_videos
 
 
 # ──────────────────────────────────────────
@@ -362,7 +490,7 @@ def build_dalle_prompt(gender: str, style_desc: str) -> str:
 # ──────────────────────────────────────────
 # Claude 分析
 # ──────────────────────────────────────────
-def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
+def build_prompt(pinterest_pins: list[dict], rss_items: list[dict], youtube_videos: list[dict] = None) -> str:
     sections = []
 
     if pinterest_pins:
@@ -373,6 +501,16 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
     if rss_items:
         lines = [f"- [{i['source']}] {i['title']}" for i in rss_items]
         sections.append(f"【穿搭媒體本週文章 {len(rss_items)} 篇】\n" + "\n".join(lines))
+
+    if youtube_videos:
+        lines = []
+        for v in youtube_videos:
+            desc_preview = v["desc"][:120].replace("\n", " ") if v["desc"] else ""
+            line = f"- [{v['source']}] {v['title']}"
+            if desc_preview:
+                line += f"\n  └ {desc_preview}"
+            lines.append(line)
+        sections.append(f"【YouTube 台灣穿搭頻道本週影片 {len(youtube_videos)} 支】\n" + "\n".join(lines))
 
     combined = "\n\n".join(sections) if sections else "（本週沒有任何資料）"
 
@@ -446,9 +584,9 @@ def parse_analysis(raw: str) -> tuple[str, str, str, str, str]:
     return main_text, male_query, female_query, male_dalle, female_dalle
 
 
-def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]):
-    if not pinterest_pins and not rss_items:
-        return "本週兩個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾。", "", "", "", ""
+def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict], youtube_videos: list[dict] = None):
+    if not pinterest_pins and not rss_items and not youtube_videos:
+        return "本週三個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾、YOUTUBE_API_KEY 是否設定。", "", "", "", ""
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -460,7 +598,7 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]):
         json={
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 700,
-            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items)}],
+            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items, youtube_videos)}],
         },
         timeout=30,
     )
@@ -476,6 +614,7 @@ def build_line_messages(
     analysis: str,
     pinterest_count: int,
     rss_count: int,
+    youtube_count: int,
     male_unsplash: str | None,
     female_unsplash: str | None,
     male_dalle: str | None,
@@ -484,7 +623,7 @@ def build_line_messages(
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%m/%d")
     header = (
         f"👗 穿搭雷達週報 {today}\n"
-        f"📌 Pinterest {pinterest_count} 張｜媒體 {rss_count} 篇\n"
+        f"📌 Pinterest {pinterest_count} 張｜媒體 {rss_count} 篇｜YouTube {youtube_count} 支\n"
         f"{'─' * 20}\n\n"
     )
 
@@ -545,11 +684,14 @@ def main():
     print("\n[來源 B] 穿搭媒體 RSS")
     rss_items = collect_fashion_rss()
 
-    print(f"\n合計：Pinterest {len(pinterest_pins)} 筆｜媒體 {len(rss_items)} 篇")
+    print("\n[來源 C] YouTube 台灣穿搭頻道")
+    youtube_videos = collect_youtube_videos()
+
+    print(f"\n合計：Pinterest {len(pinterest_pins)} 筆｜媒體 {len(rss_items)} 篇｜YouTube {len(youtube_videos)} 支")
 
     print("\nClaude 分析中...")
     analysis, male_query, female_query, male_dalle_desc, female_dalle_desc = \
-        analyze_with_claude(pinterest_pins, rss_items)
+        analyze_with_claude(pinterest_pins, rss_items, youtube_videos)
     print(f"\n{analysis}")
     print(f"\nUnsplash 關鍵字 → 男：{male_query}｜女：{female_query}")
     print(f"DALL-E 描述 → 男：{male_dalle_desc}｜女：{female_dalle_desc}")
@@ -564,7 +706,11 @@ def main():
 
     print("\n推播到 Line...")
     messages = build_line_messages(
-        analysis, len(pinterest_pins), len(rss_items),'','','','',
+        analysis,
+        len(pinterest_pins),
+        len(rss_items),
+        len(youtube_videos),
+        '', '', '', '',
         #male_unsplash, female_unsplash,
         #male_ai, female_ai,
     )
