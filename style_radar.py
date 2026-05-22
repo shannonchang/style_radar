@@ -1,7 +1,7 @@
 """
 AI 穿搭靈感雷達 - 每週自動推播
 來源 A：Pinterest CSV（手動匯出，放進 data/pinterest.csv）
-來源 B：Reddit 公開 JSON（全自動，不需要 API key）
+來源 B：穿搭媒體 RSS（Hypebeast、Highsnobiety 等）
 分析：Claude API
 推播：Line Messaging API
 """
@@ -9,6 +9,7 @@ AI 穿搭靈感雷達 - 每週自動推播
 import os
 import csv
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,14 +21,20 @@ CLAUDE_API_KEY     = os.environ["ANTHROPIC_API_KEY"]
 LINE_CHANNEL_TOKEN = os.environ["LINE_CHANNEL_TOKEN"]
 LINE_USER_ID       = os.environ["LINE_USER_ID"]
 
-REDDIT_HEADERS = {"User-Agent": "zn-style-radar/1.0 (by ZN Studio)"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
 
-SUBREDDITS = [
-    "malefashionadvice",
-    "japanesestreetwear",
-    "streetwear",
-    "frugalmalefashion",
-    "Sneakers",
+FASHION_RSS = [
+    ("Hypebeast",       "https://hypebeast.com/feed"),
+    ("Highsnobiety",    "https://www.highsnobiety.com/feed/"),
+    ("GQ",              "https://www.gq.com/feed/rss"),
+    ("Put This On",     "https://putthison.com/feed/"),
+    ("The Sartorialist","https://www.thesartorialist.com/feed/"),
 ]
 
 STYLE_PREFERENCE = """
@@ -47,7 +54,7 @@ STYLE_PREFERENCE = """
 def load_pinterest_csv() -> list[dict]:
     csv_path = Path("data/pinterest.csv")
     if not csv_path.exists():
-        print("Pinterest CSV 不存在，跳過")
+        print("  Pinterest CSV 不存在，跳過")
         return []
 
     pins = []
@@ -57,60 +64,73 @@ def load_pinterest_csv() -> list[dict]:
             pins.append({
                 "source": "Pinterest",
                 "title": row.get("Title", "").strip(),
-                "note": row.get("Note", "").strip(),
+                "note":  row.get("Note", "").strip(),
                 "board": row.get("Board Name", "").strip(),
-                "url": row.get("URL", "").strip(),
             })
 
-    print(f"Pinterest CSV：讀到 {len(pins)} 筆")
+    print(f"  讀到 {len(pins)} 筆")
     return pins
 
 
 # ──────────────────────────────────────────
-# 來源 B：Reddit 公開 JSON
+# 來源 B：穿搭媒體 RSS
 # ──────────────────────────────────────────
-def fetch_reddit_top(subreddit: str, limit: int = 8) -> list[dict]:
-    url = f"https://www.reddit.com/r/{subreddit}/top.json?t=week&limit={limit}"
+def fetch_rss(name: str, url: str, max_items: int = 5) -> list[dict]:
     try:
-        resp = requests.get(url, headers=REDDIT_HEADERS, timeout=15)
+        resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        posts = resp.json()["data"]["children"]
-        return [{
-            "source": f"r/{subreddit}",
-            "title": p["data"].get("title", ""),
-            "body": p["data"].get("selftext", "")[:300],
-            "score": p["data"].get("score", 0),
-            "permalink": f"https://reddit.com{p['data'].get('permalink', '')}",
-        } for p in posts]
+        root = ET.fromstring(resp.content)
+
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        items = root.findall(".//item") or root.findall(".//atom:entry", ns)
+
+        results = []
+        for item in items[:max_items]:
+            title = (
+                item.findtext("title") or
+                item.findtext("atom:title", namespaces=ns) or ""
+            ).strip()
+            desc = (
+                item.findtext("description") or
+                item.findtext("atom:summary", namespaces=ns) or ""
+            ).strip()[:200]
+
+            results.append({
+                "source": name,
+                "title":  title,
+                "desc":   desc,
+            })
+
+        print(f"  ✅ {name}：{len(results)} 篇")
+        return results
+
     except Exception as e:
-        print(f"Reddit r/{subreddit} 失敗：{e}")
+        print(f"  ❌ {name}：{e}")
         return []
 
 
-def collect_reddit_posts() -> list[dict]:
-    all_posts = []
-    for sub in SUBREDDITS:
-        posts = fetch_reddit_top(sub)
-        all_posts.extend(posts)
-        print(f"Reddit r/{sub}：抓到 {len(posts)} 篇")
-    return all_posts
+def collect_fashion_rss() -> list[dict]:
+    all_items = []
+    for name, url in FASHION_RSS:
+        items = fetch_rss(name, url)
+        all_items.extend(items)
+    return all_items
 
 
 # ──────────────────────────────────────────
 # Claude 分析
 # ──────────────────────────────────────────
-def build_prompt(pinterest_pins: list[dict], reddit_posts: list[dict]) -> str:
+def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
     sections = []
 
     if pinterest_pins:
         lines = [f"- [{p['board']}] {p['title']} {p['note']}".strip()
                  for p in pinterest_pins]
-        sections.append(f"【Pinterest 收藏（{len(pinterest_pins)} 張）】\n" + "\n".join(lines))
+        sections.append(f"【Pinterest 收藏 {len(pinterest_pins)} 張】\n" + "\n".join(lines))
 
-    if reddit_posts:
-        lines = [f"- [{p['source']}] {p['title']} (score: {p['score']})"
-                 for p in reddit_posts]
-        sections.append(f"【Reddit 本週熱門（{len(reddit_posts)} 篇）】\n" + "\n".join(lines))
+    if rss_items:
+        lines = [f"- [{i['source']}] {i['title']}" for i in rss_items]
+        sections.append(f"【穿搭媒體本週文章 {len(rss_items)} 篇】\n" + "\n".join(lines))
 
     combined = "\n\n".join(sections) if sections else "（本週沒有任何資料）"
 
@@ -125,23 +145,23 @@ def build_prompt(pinterest_pins: list[dict], reddit_posts: list[dict]) -> str:
 請根據我的風格偏好，用繁體中文回答，格式如下：
 
 🎯 本週風格信號
-（從收藏和熱門貼文中，找出 3 個符合我偏好的關鍵字）
+（3 個符合我偏好的關鍵字）
 
-📰 Reddit 值得關注
-（挑 1～2 篇最值得看的，說明原因，附上標題）
+📰 值得關注
+（從媒體文章挑 1～2 個最值得看的，說明原因）
 
-📐 色系傾向
-（一句話描述本週整體色調）
+📐 本週色系傾向
+（一句話）
 
 💡 下週可以嘗試
-（一個具體穿搭方向，越實際越好）
+（一個具體穿搭方向）
 
 語氣像朋友，不要像 AI 報告，150 字以內。"""
 
 
-def analyze_with_claude(pinterest_pins: list[dict], reddit_posts: list[dict]) -> str:
-    if not pinterest_pins and not reddit_posts:
-        return "本週沒有收到任何資料，記得把 Pinterest CSV 放進 data/ 資料夾！"
+def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
+    if not pinterest_pins and not rss_items:
+        return "本週兩個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾，以及網路連線是否正常。"
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -153,7 +173,7 @@ def analyze_with_claude(pinterest_pins: list[dict], reddit_posts: list[dict]) ->
         json={
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 500,
-            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, reddit_posts)}],
+            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items)}],
         },
         timeout=30,
     )
@@ -164,13 +184,12 @@ def analyze_with_claude(pinterest_pins: list[dict], reddit_posts: list[dict]) ->
 # ──────────────────────────────────────────
 # Line 推播
 # ──────────────────────────────────────────
-def send_line(message: str, pinterest_count: int, reddit_count: int):
+def send_line(message: str, pinterest_count: int, rss_count: int):
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%m/%d")
-    full_message = (
+    header = (
         f"👗 穿搭雷達週報 {today}\n"
-        f"📌 Pinterest {pinterest_count} 張｜Reddit {reddit_count} 篇\n"
+        f"📌 Pinterest {pinterest_count} 張｜媒體 {rss_count} 篇\n"
         f"{'─' * 20}\n\n"
-        f"{message}"
     )
 
     resp = requests.post(
@@ -181,7 +200,7 @@ def send_line(message: str, pinterest_count: int, reddit_count: int):
         },
         json={
             "to": LINE_USER_ID,
-            "messages": [{"type": "text", "text": full_message}],
+            "messages": [{"type": "text", "text": header + message}],
         },
         timeout=15,
     )
@@ -193,22 +212,22 @@ def send_line(message: str, pinterest_count: int, reddit_count: int):
 # 主流程
 # ──────────────────────────────────────────
 def main():
-    print("=== 穿搭雷達啟動 ===")
+    print("=== 穿搭雷達啟動 ===\n")
 
-    print("\n[來源 A] 讀取 Pinterest CSV...")
+    print("[來源 A] Pinterest CSV")
     pinterest_pins = load_pinterest_csv()
 
-    print("\n[來源 B] 抓取 Reddit 本週熱門...")
-    reddit_posts = collect_reddit_posts()
+    print("\n[來源 B] 穿搭媒體 RSS")
+    rss_items = collect_fashion_rss()
 
-    print(f"\n合計：Pinterest {len(pinterest_pins)} 筆 + Reddit {len(reddit_posts)} 篇")
+    print(f"\n合計：Pinterest {len(pinterest_pins)} 筆｜媒體 {len(rss_items)} 篇")
 
     print("\nClaude 分析中...")
-    analysis = analyze_with_claude(pinterest_pins, reddit_posts)
-    print(f"\n分析結果：\n{analysis}")
+    analysis = analyze_with_claude(pinterest_pins, rss_items)
+    print(f"\n{analysis}")
 
     print("\n推播到 Line...")
-    send_line(analysis, len(pinterest_pins), len(reddit_posts))
+    send_line(analysis, len(pinterest_pins), len(rss_items))
 
     print("\n=== 完成 ===")
 
