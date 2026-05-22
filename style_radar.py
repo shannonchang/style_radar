@@ -37,29 +37,11 @@ FASHION_RSS = [
 ("MEN's FOLIO", "https://mens-folio.com/feed"),
 ("GQ Taiwan", "https://www.gq.com.tw/feed"),
 ("Yakkun Fashion", "https://yakkun-fashion.jp/feed"),
-# ===== 男生 =====
-    ("plain-me Blog", "https://www.plain-me.com/blogs/blog.atom"),
-    ("OVERDOPE", "https://overdope.com/feed"),
-    ("COOL-STYLE", "https://cool-style.com.tw/feed"),
-    ("FACY MEN", "https://facy.jp/feed"),
-    ("Mastered JP", "https://mastered.jp/feed/"),
-
-    # ===== 女生 =====
-    ("Marie Claire TW", "https://www.marieclaire.com.tw/rss"),
-    ("ELLE Taiwan", "https://www.elle.com/tw/rss"),
-    ("VOGUE Taiwan", "https://www.vogue.com.tw/rss"),
-    ("PopDaily 波波黛莉", "https://www.popdaily.com.tw/rss"),
-    ("BEAUTY美人圈", "https://www.beauty321.com/rss"),
-    ("Cosmopolitan TW", "https://www.cosmopolitan.com/tw/rss"),
-
-    # ===== 韓系 / 日系 =====
-    ("FACY", "https://facy.jp/feed"),
+("MEN'S NON-NO", "https://www.mensnonno.jp/feed/"),
+    ("Yakkun Fashion", "https://yakkun-fashion.jp/feed/"),
+    ("BEAUTY美人圈", "https://www.beauty321.com/feed"),
     ("MERY JP", "https://mery.jp/feed"),
-    ("Eyesmag KR", "https://eyesmag.com/feed"),
-
-    # ===== 生活美感 =====
     ("Shopping Design", "https://www.shoppingdesign.com.tw/rss"),
-    ("every little d", "https://everylittled.com/feed"),
 ]
 
 STYLE_PREFERENCE = """
@@ -582,7 +564,7 @@ def main():
 
     print("\n推播到 Line...")
     messages = build_line_messages(
-        analysis, len(pinterest_pins), len(rss_items),
+        analysis, len(pinterest_pins), len(rss_items),'','','','',
         #male_unsplash, female_unsplash,
         #male_ai, female_ai,
     )
