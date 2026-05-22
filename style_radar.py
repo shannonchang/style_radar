@@ -1,109 +1,147 @@
 """
 AI 穿搭靈感雷達 - 每週自動推播
-資料來源：Pinterest API v5
+來源 A：Pinterest CSV（手動匯出，放進 data/pinterest.csv）
+來源 B：Reddit 公開 JSON（全自動，不需要 API key）
 分析：Claude API
-推播：Telegram Bot
+推播：Line Messaging API
 """
 
 import os
-import json
+import csv
 import requests
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 # ──────────────────────────────────────────
-# 設定區（全部從環境變數讀取，不要硬寫在這裡）
+# 設定區
 # ──────────────────────────────────────────
-PINTEREST_TOKEN = os.environ["PINTEREST_ACCESS_TOKEN"]
-CLAUDE_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+CLAUDE_API_KEY     = os.environ["ANTHROPIC_API_KEY"]
+LINE_CHANNEL_TOKEN = os.environ["LINE_CHANNEL_TOKEN"]
+LINE_USER_ID       = os.environ["LINE_USER_ID"]
 
-# 你想監控的 Pinterest board ID（見下方說明如何取得）
-BOARD_IDS = os.environ.get("PINTEREST_BOARD_IDS", "").split(",")
+REDDIT_HEADERS = {"User-Agent": "zn-style-radar/1.0 (by ZN Studio)"}
 
+SUBREDDITS = [
+    "malefashionadvice",
+    "japanesestreetwear",
+    "streetwear",
+    "frugalmalefashion",
+    "Sneakers",
+]
 
-# ──────────────────────────────────────────
-# Step 1：抓本週新 Pins
-# ──────────────────────────────────────────
-def fetch_recent_pins(board_id: str, days: int = 7) -> list[dict]:
-    """抓指定 board 最近 N 天的 pins"""
-    url = f"https://api.pinterest.com/v5/boards/{board_id}/pins"
-    headers = {"Authorization": f"Bearer {PINTEREST_TOKEN}"}
-    params = {
-        "page_size": 25,
-        "fields": "id,title,description,media,link,created_at"
-    }
-
-    resp = requests.get(url, headers=headers, params=params, timeout=15)
-    resp.raise_for_status()
-    pins = resp.json().get("items", [])
-
-    # 過濾本週內的
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    recent = []
-    for pin in pins:
-        created = pin.get("created_at", "")
-        if created:
-            pin_time = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            if pin_time >= cutoff:
-                recent.append(pin)
-
-    return recent
-
-
-def collect_all_pins() -> list[dict]:
-    all_pins = []
-    for board_id in BOARD_IDS:
-        board_id = board_id.strip()
-        if not board_id:
-            continue
-        try:
-            pins = fetch_recent_pins(board_id)
-            all_pins.extend(pins)
-            print(f"Board {board_id}：抓到 {len(pins)} 張")
-        except Exception as e:
-            print(f"Board {board_id} 失敗：{e}")
-    return all_pins
+STYLE_PREFERENCE = """
+- clean fit
+- relaxed fit / 鬆弛感
+- 亞洲比例
+- 韓系 / 日系
+- NB 復古鞋
+- 灰白黑色系
+- 不喜歡：浮誇高街、過度 logo
+"""
 
 
 # ──────────────────────────────────────────
-# Step 2：用 Claude 分析風格趨勢
+# 來源 A：Pinterest CSV
 # ──────────────────────────────────────────
-def build_pin_summary(pins: list[dict]) -> str:
-    """把 pins 資訊整理成文字給 Claude 分析"""
-    lines = []
-    for i, pin in enumerate(pins, 1):
-        title = pin.get("title") or ""
-        desc  = pin.get("description") or ""
-        lines.append(f"{i}. {title} {desc}".strip())
-    return "\n".join(lines) if lines else "（本週沒有新收藏）"
+def load_pinterest_csv() -> list[dict]:
+    csv_path = Path("data/pinterest.csv")
+    if not csv_path.exists():
+        print("Pinterest CSV 不存在，跳過")
+        return []
+
+    pins = []
+    with open(csv_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            pins.append({
+                "source": "Pinterest",
+                "title": row.get("Title", "").strip(),
+                "note": row.get("Note", "").strip(),
+                "board": row.get("Board Name", "").strip(),
+                "url": row.get("URL", "").strip(),
+            })
+
+    print(f"Pinterest CSV：讀到 {len(pins)} 筆")
+    return pins
 
 
-def analyze_with_claude(pins: list[dict]) -> str:
-    """呼叫 Claude API 分析本週收藏趨勢"""
-    if not pins:
-        return "本週沒有新的穿搭收藏，下週繼續 pin 吧！"
+# ──────────────────────────────────────────
+# 來源 B：Reddit 公開 JSON
+# ──────────────────────────────────────────
+def fetch_reddit_top(subreddit: str, limit: int = 8) -> list[dict]:
+    url = f"https://www.reddit.com/r/{subreddit}/top.json?t=week&limit={limit}"
+    try:
+        resp = requests.get(url, headers=REDDIT_HEADERS, timeout=15)
+        resp.raise_for_status()
+        posts = resp.json()["data"]["children"]
+        return [{
+            "source": f"r/{subreddit}",
+            "title": p["data"].get("title", ""),
+            "body": p["data"].get("selftext", "")[:300],
+            "score": p["data"].get("score", 0),
+            "permalink": f"https://reddit.com{p['data'].get('permalink', '')}",
+        } for p in posts]
+    except Exception as e:
+        print(f"Reddit r/{subreddit} 失敗：{e}")
+        return []
 
-    summary = build_pin_summary(pins)
 
-    prompt = f"""你是亞洲男生穿搭顧問。
+def collect_reddit_posts() -> list[dict]:
+    all_posts = []
+    for sub in SUBREDDITS:
+        posts = fetch_reddit_top(sub)
+        all_posts.extend(posts)
+        print(f"Reddit r/{sub}：抓到 {len(posts)} 篇")
+    return all_posts
 
-以下是這週新收藏的穿搭（共 {len(pins)} 張）：
-{summary}
 
-請分析並用繁體中文回答，格式如下：
+# ──────────────────────────────────────────
+# Claude 分析
+# ──────────────────────────────────────────
+def build_prompt(pinterest_pins: list[dict], reddit_posts: list[dict]) -> str:
+    sections = []
+
+    if pinterest_pins:
+        lines = [f"- [{p['board']}] {p['title']} {p['note']}".strip()
+                 for p in pinterest_pins]
+        sections.append(f"【Pinterest 收藏（{len(pinterest_pins)} 張）】\n" + "\n".join(lines))
+
+    if reddit_posts:
+        lines = [f"- [{p['source']}] {p['title']} (score: {p['score']})"
+                 for p in reddit_posts]
+        sections.append(f"【Reddit 本週熱門（{len(reddit_posts)} 篇）】\n" + "\n".join(lines))
+
+    combined = "\n\n".join(sections) if sections else "（本週沒有任何資料）"
+
+    return f"""你是亞洲男生穿搭顧問。
+
+我的風格偏好：
+{STYLE_PREFERENCE}
+
+以下是這週的穿搭資料：
+{combined}
+
+請根據我的風格偏好，用繁體中文回答，格式如下：
 
 🎯 本週風格信號
-（3 個關鍵字，例如：鬆弛感 / 灰白色系 / NB 復古）
+（從收藏和熱門貼文中，找出 3 個符合我偏好的關鍵字）
+
+📰 Reddit 值得關注
+（挑 1～2 篇最值得看的，說明原因，附上標題）
 
 📐 色系傾向
-（一句話描述）
+（一句話描述本週整體色調）
 
 💡 下週可以嘗試
 （一個具體穿搭方向，越實際越好）
 
-語氣像朋友，不要像 AI 報告，100 字以內。"""
+語氣像朋友，不要像 AI 報告，150 字以內。"""
+
+
+def analyze_with_claude(pinterest_pins: list[dict], reddit_posts: list[dict]) -> str:
+    if not pinterest_pins and not reddit_posts:
+        return "本週沒有收到任何資料，記得把 Pinterest CSV 放進 data/ 資料夾！"
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -114,8 +152,8 @@ def analyze_with_claude(pins: list[dict]) -> str:
         },
         json={
             "model": "claude-sonnet-4-20250514",
-            "max_tokens": 400,
-            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 500,
+            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, reddit_posts)}],
         },
         timeout=30,
     )
@@ -124,20 +162,31 @@ def analyze_with_claude(pins: list[dict]) -> str:
 
 
 # ──────────────────────────────────────────
-# Step 3：推播到 Telegram
+# Line 推播
 # ──────────────────────────────────────────
-def send_telegram(message: str):
+def send_line(message: str, pinterest_count: int, reddit_count: int):
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%m/%d")
-    full_message = f"👗 穿搭雷達週報 {today}\n\n{message}"
+    full_message = (
+        f"👗 穿搭雷達週報 {today}\n"
+        f"📌 Pinterest {pinterest_count} 張｜Reddit {reddit_count} 篇\n"
+        f"{'─' * 20}\n\n"
+        f"{message}"
+    )
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    resp = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": full_message,
-        "parse_mode": "HTML",
-    }, timeout=15)
+    resp = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "to": LINE_USER_ID,
+            "messages": [{"type": "text", "text": full_message}],
+        },
+        timeout=15,
+    )
     resp.raise_for_status()
-    print("Telegram 推播成功")
+    print("Line 推播成功")
 
 
 # ──────────────────────────────────────────
@@ -146,18 +195,22 @@ def send_telegram(message: str):
 def main():
     print("=== 穿搭雷達啟動 ===")
 
-    print("抓取本週 Pins...")
-    pins = collect_all_pins()
-    print(f"總共 {len(pins)} 張新收藏")
+    print("\n[來源 A] 讀取 Pinterest CSV...")
+    pinterest_pins = load_pinterest_csv()
 
-    print("Claude 分析中...")
-    analysis = analyze_with_claude(pins)
-    print(f"分析結果：\n{analysis}")
+    print("\n[來源 B] 抓取 Reddit 本週熱門...")
+    reddit_posts = collect_reddit_posts()
 
-    print("推播到 Telegram...")
-    send_telegram(analysis)
+    print(f"\n合計：Pinterest {len(pinterest_pins)} 筆 + Reddit {len(reddit_posts)} 篇")
 
-    print("=== 完成 ===")
+    print("\nClaude 分析中...")
+    analysis = analyze_with_claude(pinterest_pins, reddit_posts)
+    print(f"\n分析結果：\n{analysis}")
+
+    print("\n推播到 Line...")
+    send_line(analysis, len(pinterest_pins), len(reddit_posts))
+
+    print("\n=== 完成 ===")
 
 
 if __name__ == "__main__":
