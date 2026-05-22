@@ -2,7 +2,7 @@
 AI 穿搭靈感雷達 - 每週自動推播
 來源 A：Pinterest CSV（手動匯出，放進 data/pinterest.csv）
 來源 B：穿搭媒體 RSS（Hypebeast、Highsnobiety 等）
-圖片：Unsplash API
+圖片：Unsplash API（真實照）+ DALL-E 3（AI 生成）
 分析：Claude API
 推播：Line Messaging API
 """
@@ -22,6 +22,7 @@ CLAUDE_API_KEY      = os.environ["ANTHROPIC_API_KEY"]
 LINE_CHANNEL_TOKEN  = os.environ["LINE_CHANNEL_TOKEN"]
 LINE_USER_ID        = os.environ["LINE_USER_ID"]
 UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
+OPENAI_API_KEY      = os.environ["OPENAI_API_KEY"]
 
 HEADERS = {
     "User-Agent": (
@@ -32,10 +33,10 @@ HEADERS = {
 }
 
 FASHION_RSS = [
-    ("Hypebeast",     "https://hypebeast.com/feed"),
-    ("Highsnobiety",  "https://www.highsnobiety.com/feed/"),
-    ("GQ",            "https://www.gq.com/feed/rss"),
-    ("Put This On",   "https://putthison.com/feed/"),
+    ("Hypebeast",    "https://hypebeast.com/feed"),
+    ("Highsnobiety", "https://www.highsnobiety.com/feed/"),
+    ("GQ",           "https://www.gq.com/feed/rss"),
+    ("Put This On",  "https://putthison.com/feed/"),
 ]
 
 STYLE_PREFERENCE = """
@@ -47,6 +48,11 @@ STYLE_PREFERENCE = """
 - 灰白黑色系
 - 不喜歡：浮誇高街、過度 logo
 """
+
+FALLBACK_QUERIES = {
+    "male":   ["minimal menswear outfit", "clean fit streetwear", "korean fashion men"],
+    "female": ["minimal womenswear outfit", "clean fit women fashion", "korean fashion women"],
+}
 
 
 # ──────────────────────────────────────────
@@ -113,16 +119,9 @@ def collect_fashion_rss() -> list[dict]:
 
 
 # ──────────────────────────────────────────
-# Unsplash 圖片搜尋
+# Unsplash：真實穿搭照
 # ──────────────────────────────────────────
-# Unsplash 搜尋失敗時的備用關鍵字
-FALLBACK_QUERIES = {
-    "male":   ["minimal menswear outfit", "clean fit streetwear", "korean fashion men"],
-    "female": ["minimal womenswear outfit", "clean fit women fashion", "korean fashion women"],
-}
-
 def fetch_unsplash_image(query: str, gender: str = "") -> str | None:
-    """搜尋 Unsplash，無結果時自動嘗試備用關鍵字"""
     queries = [query]
     if gender in FALLBACK_QUERIES:
         queries += FALLBACK_QUERIES[gender]
@@ -144,19 +143,66 @@ def fetch_unsplash_image(query: str, gender: str = "") -> str | None:
             results = resp.json().get("results", [])
             if results:
                 url = results[0]["urls"]["regular"]
-                print(f"  ✅ Unsplash 搜尋「{q}」→ 取得圖片")
+                print(f"  ✅ Unsplash「{q}」→ 取得圖片")
                 return url
             print(f"  ⚠️ 搜尋「{q}」無結果，嘗試備用...")
         except Exception as e:
             print(f"  ❌ Unsplash 失敗：{e}")
             break
 
-    print(f"  ❌ 所有關鍵字都無結果")
+    print("  ❌ Unsplash 所有關鍵字都無結果")
     return None
 
 
 # ──────────────────────────────────────────
-# Claude 分析（同時產出圖片搜尋關鍵字）
+# DALL-E 3：AI 生成穿搭示意圖
+# ──────────────────────────────────────────
+def generate_dalle_image(dalle_prompt: str) -> str | None:
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "dall-e-3",
+                "prompt": dalle_prompt,
+                "n": 1,
+                "size": "1024x1024",
+                "quality": "standard",
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        url = resp.json()["data"][0]["url"]
+        print(f"  ✅ DALL-E 3 生成成功")
+        return url
+    except Exception as e:
+        print(f"  ❌ DALL-E 3 失敗：{e}")
+        return None
+
+
+def build_dalle_prompt(gender: str, style_desc: str) -> str:
+    """把 Claude 分析出的風格描述轉成 DALL-E prompt"""
+    if gender == "male":
+        return (
+            f"Fashion lookbook photo of an Asian male model wearing {style_desc}. "
+            "Clean minimal background, studio lighting, full body shot showing outfit proportions. "
+            "Korean street fashion aesthetic, clean fit, relaxed silhouette. "
+            "High quality fashion photography, no text, no watermark."
+        )
+    else:
+        return (
+            f"Fashion lookbook photo of an Asian female model wearing {style_desc}. "
+            "Clean minimal background, studio lighting, full body shot showing outfit proportions. "
+            "Korean minimal fashion aesthetic, simple and elegant. "
+            "High quality fashion photography, no text, no watermark."
+        )
+
+
+# ──────────────────────────────────────────
+# Claude 分析
 # ──────────────────────────────────────────
 def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
     sections = []
@@ -198,37 +244,44 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict]) -> str:
 （一句話）
 
 ---
-最後在回答最末尾，另起一行加上以下兩行（純英文關鍵字，給圖片搜尋用）：
-MALE_QUERY: [3-5個英文關鍵字，描述男生穿搭，例如: korean minimal menswear clean fit]
-FEMALE_QUERY: [3-5個英文關鍵字，描述女生穿搭，例如: minimal asian womenswear neutral]
+最後在回答最末尾，另起一行加上以下四行（供圖片生成使用，不要給用戶看）：
+MALE_QUERY: [3-5個英文關鍵字，給 Unsplash 搜尋真實穿搭照]
+FEMALE_QUERY: [3-5個英文關鍵字，給 Unsplash 搜尋真實穿搭照]
+MALE_DALLE: [10-15個英文單字，描述男生本週穿搭的具體單品和顏色，給 DALL-E 生成圖用]
+FEMALE_DALLE: [10-15個英文單字，描述女生本週穿搭的具體單品和顏色，給 DALL-E 生成圖用]
 
 語氣像朋友，不要像 AI 報告，200 字以內。"""
 
 
-def parse_analysis(raw: str) -> tuple[str, str, str]:
-    """拆出主要分析文字、男生圖片關鍵字、女生圖片關鍵字"""
-    male_query  = "korean minimal menswear clean fit"
-    female_query = "minimal asian womenswear neutral outfit"
-    main_text   = raw
+def parse_analysis(raw: str) -> tuple[str, str, str, str, str]:
+    """拆出主要分析文字、Unsplash 關鍵字、DALL-E prompt"""
+    male_query   = "korean minimal menswear clean fit"
+    female_query = "minimal womenswear neutral outfit"
+    male_dalle   = "oversized linen shirt wide pants white sneakers minimal korean menswear"
+    female_dalle = "linen dress neutral tones minimal korean womenswear simple elegant"
 
     for line in raw.splitlines():
         if line.startswith("MALE_QUERY:"):
             male_query = line.replace("MALE_QUERY:", "").strip()
         elif line.startswith("FEMALE_QUERY:"):
             female_query = line.replace("FEMALE_QUERY:", "").strip()
+        elif line.startswith("MALE_DALLE:"):
+            male_dalle = line.replace("MALE_DALLE:", "").strip()
+        elif line.startswith("FEMALE_DALLE:"):
+            female_dalle = line.replace("FEMALE_DALLE:", "").strip()
 
-    # 移除 query 行，只保留給用戶看的文字
     main_text = "\n".join(
         line for line in raw.splitlines()
-        if not line.startswith("MALE_QUERY:") and not line.startswith("FEMALE_QUERY:")
+        if not any(line.startswith(k) for k in
+                   ["MALE_QUERY:", "FEMALE_QUERY:", "MALE_DALLE:", "FEMALE_DALLE:", "---"])
     ).strip()
 
-    return main_text, male_query, female_query
+    return main_text, male_query, female_query, male_dalle, female_dalle
 
 
-def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> tuple[str, str, str]:
+def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]):
     if not pinterest_pins and not rss_items:
-        return "本週兩個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾。", "", ""
+        return "本週兩個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾。", "", "", "", ""
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -239,7 +292,7 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> tu
         },
         json={
             "model": "claude-sonnet-4-20250514",
-            "max_tokens": 600,
+            "max_tokens": 700,
             "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items)}],
         },
         timeout=30,
@@ -250,14 +303,16 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict]) -> tu
 
 
 # ──────────────────────────────────────────
-# Line 推播（文字 + 圖片）
+# Line 推播
 # ──────────────────────────────────────────
 def build_line_messages(
     analysis: str,
     pinterest_count: int,
     rss_count: int,
-    male_img_url: str | None,
-    female_img_url: str | None,
+    male_unsplash: str | None,
+    female_unsplash: str | None,
+    male_dalle: str | None,
+    female_dalle: str | None,
 ) -> list[dict]:
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%m/%d")
     header = (
@@ -266,39 +321,36 @@ def build_line_messages(
         f"{'─' * 20}\n\n"
     )
 
-    messages = [
-        {"type": "text", "text": header + analysis}
-    ]
+    messages = [{"type": "text", "text": header + analysis}]
 
-    # 男生參考圖
-    if male_img_url:
+    def add_image(url: str, caption: str):
         messages.append({
             "type": "image",
-            "originalContentUrl": male_img_url,
-            "previewImageUrl":    male_img_url,
+            "originalContentUrl": url,
+            "previewImageUrl":    url,
         })
-        messages.append({
-            "type": "text",
-            "text": "👆 男生穿搭參考圖（via Unsplash）"
-        })
+        messages.append({"type": "text", "text": caption})
 
-    # 女生參考圖
-    if female_img_url:
-        messages.append({
-            "type": "image",
-            "originalContentUrl": female_img_url,
-            "previewImageUrl":    female_img_url,
-        })
-        messages.append({
-            "type": "text",
-            "text": "👆 女生穿搭參考圖（via Unsplash）"
-        })
+    # 男生圖片
+    if male_unsplash or male_dalle:
+        messages.append({"type": "text", "text": "── 👨 男生參考圖 ──"})
+        if male_unsplash:
+            add_image(male_unsplash, "📷 真實穿搭參考（Unsplash）")
+        if male_dalle:
+            add_image(male_dalle, "🎨 AI 風格示意圖（DALL-E 3）")
+
+    # 女生圖片
+    if female_unsplash or female_dalle:
+        messages.append({"type": "text", "text": "── 👩 女生參考圖 ──"})
+        if female_unsplash:
+            add_image(female_unsplash, "📷 真實穿搭參考（Unsplash）")
+        if female_dalle:
+            add_image(female_dalle, "🎨 AI 風格示意圖（DALL-E 3）")
 
     return messages
 
 
 def send_line(messages: list[dict]):
-    # Line 單次最多 5 則訊息
     chunks = [messages[i:i+5] for i in range(0, len(messages), 5)]
     for chunk in chunks:
         resp = requests.post(
@@ -329,18 +381,25 @@ def main():
     print(f"\n合計：Pinterest {len(pinterest_pins)} 筆｜媒體 {len(rss_items)} 篇")
 
     print("\nClaude 分析中...")
-    analysis, male_query, female_query = analyze_with_claude(pinterest_pins, rss_items)
+    analysis, male_query, female_query, male_dalle_desc, female_dalle_desc = \
+        analyze_with_claude(pinterest_pins, rss_items)
     print(f"\n{analysis}")
-    print(f"\n男生圖片關鍵字：{male_query}")
-    print(f"女生圖片關鍵字：{female_query}")
+    print(f"\nUnsplash 關鍵字 → 男：{male_query}｜女：{female_query}")
+    print(f"DALL-E 描述 → 男：{male_dalle_desc}｜女：{female_dalle_desc}")
 
-    print("\nUnsplash 搜尋參考圖...")
-    male_img   = fetch_unsplash_image(male_query,   gender="male")   if male_query   else None
-    female_img = fetch_unsplash_image(female_query, gender="female") if female_query else None
+    print("\n[圖片] Unsplash 搜尋...")
+    male_unsplash   = fetch_unsplash_image(male_query,   gender="male")
+    female_unsplash = fetch_unsplash_image(female_query, gender="female")
+
+    print("\n[圖片] DALL-E 3 生成...")
+    male_ai   = generate_dalle_image(build_dalle_prompt("male",   male_dalle_desc))
+    female_ai = generate_dalle_image(build_dalle_prompt("female", female_dalle_desc))
 
     print("\n推播到 Line...")
     messages = build_line_messages(
-        analysis, len(pinterest_pins), len(rss_items), male_img, female_img
+        analysis, len(pinterest_pins), len(rss_items),
+        male_unsplash, female_unsplash,
+        male_ai, female_ai,
     )
     send_line(messages)
 
