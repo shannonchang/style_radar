@@ -157,26 +157,35 @@ def fetch_unsplash_image(query: str, gender: str = "") -> str | None:
 # ──────────────────────────────────────────
 # DALL-E 3：AI 生成穿搭示意圖
 # ──────────────────────────────────────────
+def _call_gpt_image(dalle_prompt: str) -> dict:
+    """呼叫 gpt-image-1 API，回傳 response json"""
+    resp = requests.post(
+        "https://api.openai.com/v1/images/generations",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "gpt-image-1",
+            "prompt": dalle_prompt,
+            "n": 1,
+            "size": "1024x1024",
+        },
+        timeout=180,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def generate_dalle_image(dalle_prompt: str) -> str | None:
     try:
-        # gpt-image-1 回傳 base64，需存成暫存檔再上傳
         import base64, tempfile, os as _os
-        resp = requests.post(
-            "https://api.openai.com/v1/images/generations",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-image-1",
-                "prompt": dalle_prompt,
-                "n": 1,
-                "size": "1024x1024",
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        # 最多 retry 一次
+        try:
+            data = _call_gpt_image(dalle_prompt)
+        except Exception as retry_e:
+            print(f"  ⚠️ 第一次失敗（{retry_e}），retry 中...")
+            data = _call_gpt_image(dalle_prompt)
 
         # gpt-image-1 回傳 base64 字串
         b64 = data["data"][0].get("b64_json")
