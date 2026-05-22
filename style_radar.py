@@ -187,17 +187,17 @@ def build_dalle_prompt(gender: str, style_desc: str) -> str:
     """把 Claude 分析出的風格描述轉成 DALL-E prompt"""
     if gender == "male":
         return (
-            f"Fashion lookbook photo of an Asian male model wearing {style_desc}. "
-            "Clean minimal background, studio lighting, full body shot showing outfit proportions. "
-            "Korean street fashion aesthetic, clean fit, relaxed silhouette. "
-            "High quality fashion photography, no text, no watermark."
+            f"Flat lay fashion editorial: {style_desc}. "
+            "Minimalist overhead shot of neatly arranged clothing items and accessories on white background. "
+            "Clean aesthetic, soft natural lighting, no people, no text, no watermark. "
+            "Magazine style product photography."
         )
     else:
         return (
-            f"Fashion lookbook photo of an Asian female model wearing {style_desc}. "
-            "Clean minimal background, studio lighting, full body shot showing outfit proportions. "
-            "Korean minimal fashion aesthetic, simple and elegant. "
-            "High quality fashion photography, no text, no watermark."
+            f"Flat lay fashion editorial: {style_desc}. "
+            "Minimalist overhead shot of neatly arranged clothing items and accessories on white background. "
+            "Clean aesthetic, soft natural lighting, no people, no text, no watermark. "
+            "Magazine style product photography."
         )
 
 
