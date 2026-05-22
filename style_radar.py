@@ -173,7 +173,27 @@ def generate_dalle_image(dalle_prompt: str) -> str | None:
                 "quality": "standard",
             },
             timeout=60,
+            allow_redirects=False,
         )
+        # 如果收到 redirect，手動處理
+        if resp.status_code in (301, 302, 307, 308):
+            location = resp.headers.get("Location", "")
+            print(f"  ⚠️ Redirect 到：{location}")
+            resp = requests.post(
+                location,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "dall-e-3",
+                    "prompt": dalle_prompt,
+                    "n": 1,
+                    "size": "1024x1024",
+                    "quality": "standard",
+                },
+                timeout=60,
+            )
         resp.raise_for_status()
         url = resp.json()["data"][0]["url"]
         print(f"  ✅ DALL-E 3 生成成功")
@@ -187,17 +207,17 @@ def build_dalle_prompt(gender: str, style_desc: str) -> str:
     """把 Claude 分析出的風格描述轉成 DALL-E prompt"""
     if gender == "male":
         return (
-            f"Flat lay fashion editorial: {style_desc}. "
-            "Minimalist overhead shot of neatly arranged clothing items and accessories on white background. "
-            "Clean aesthetic, soft natural lighting, no people, no text, no watermark. "
-            "Magazine style product photography."
+            f"Fashion lookbook photo of an Asian male model wearing {style_desc}. "
+            "Clean minimal background, studio lighting, full body shot showing outfit proportions. "
+            "Korean street fashion aesthetic, clean fit, relaxed silhouette. "
+            "High quality fashion photography, no text, no watermark."
         )
     else:
         return (
-            f"Flat lay fashion editorial: {style_desc}. "
-            "Minimalist overhead shot of neatly arranged clothing items and accessories on white background. "
-            "Clean aesthetic, soft natural lighting, no people, no text, no watermark. "
-            "Magazine style product photography."
+            f"Fashion lookbook photo of an Asian female model wearing {style_desc}. "
+            "Clean minimal background, studio lighting, full body shot showing outfit proportions. "
+            "Korean minimal fashion aesthetic, simple and elegant. "
+            "High quality fashion photography, no text, no watermark."
         )
 
 
