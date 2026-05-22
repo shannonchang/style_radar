@@ -200,6 +200,8 @@ def generate_dalle_image(dalle_prompt: str) -> str | None:
         return url
     except Exception as e:
         print(f"  ❌ DALL-E 3 失敗：{e}")
+        if hasattr(e, "response") and e.response is not None:
+            print(f"  ❌ 錯誤內容：{e.response.text}")
         return None
 
 
