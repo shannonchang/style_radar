@@ -24,7 +24,13 @@ LINE_CHANNEL_TOKEN  = os.environ["LINE_CHANNEL_TOKEN"]
 LINE_USER_ID        = os.environ["LINE_USER_ID"]
 UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
 OPENAI_API_KEY      = os.environ["OPENAI_API_KEY"]
-YOUTUBE_API_KEY     = os.environ["YOUTUBE_API_KEY"]#os.environ.get("YOUTUBE_API_KEY", "")  # 來源 C
+YOUTUBE_API_KEY            = os.environ.get("YOUTUBE_API_KEY", "")
+PINTEREST_APP_ID           = os.environ.get("PINTEREST_APP_ID", "")
+PINTEREST_APP_SECRET       = os.environ.get("PINTEREST_APP_SECRET", "")
+PINTEREST_ACCESS_TOKEN     = os.environ.get("PINTEREST_ACCESS_TOKEN", "")
+PINTEREST_REFRESH_TOKEN    = os.environ.get("PINTEREST_REFRESH_TOKEN", "")
+GITHUB_TOKEN               = os.environ.get("GITHUB_TOKEN", "")   # Actions 內建，不用另外加
+GITHUB_REPOSITORY          = os.environ.get("GITHUB_REPOSITORY", "")  # owner/repo
 
 # YouTube 頻道名稱（用搜尋方式找 channelId，不需要手動維護 ID）
 YOUTUBE_CHANNELS = [
@@ -190,15 +196,171 @@ FALLBACK_QUERIES = {
 
 
 # ──────────────────────────────────────────
-# 來源 A：Pinterest CSV
+# Pinterest Token 自動更新
 # ──────────────────────────────────────────
-def load_pinterest_csv() -> list[dict]:
-    csv_path = Path("data/pinterest.csv")
-    if not csv_path.exists():
-        print("  Pinterest CSV 不存在，跳過")
+def refresh_pinterest_token() -> str:
+    """
+    用 refresh_token 換新的 access_token。
+    換成功後自動把新的兩個 token 更新回 GitHub Secrets，
+    這樣下次 Actions 執行時仍然有效。
+    回傳新的 access_token，失敗回傳空字串。
+    """
+    if not all([PINTEREST_APP_ID, PINTEREST_APP_SECRET, PINTEREST_REFRESH_TOKEN]):
+        print("  ⚠️ Pinterest refresh 所需變數不完整，跳過")
+        return ""
+
+    try:
+        resp = requests.post(
+            "https://api.pinterest.com/v5/oauth/token",
+            auth=(PINTEREST_APP_ID, PINTEREST_APP_SECRET),
+            data={
+                "grant_type":    "refresh_token",
+                "refresh_token": PINTEREST_REFRESH_TOKEN,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        new_access  = data.get("access_token", "")
+        new_refresh = data.get("refresh_token", PINTEREST_REFRESH_TOKEN)
+
+        print("  ✅ Pinterest token refresh 成功")
+
+        # 把新 token 寫回 GitHub Secrets
+        _update_github_secret("PINTEREST_ACCESS_TOKEN", new_access)
+        _update_github_secret("PINTEREST_REFRESH_TOKEN", new_refresh)
+
+        return new_access
+
+    except Exception as e:
+        print(f"  ❌ Pinterest token refresh 失敗：{e}")
+        return ""
+
+
+def _update_github_secret(secret_name: str, secret_value: str):
+    """透過 GitHub API 更新 Secrets（需要 GITHUB_TOKEN 有 secrets 寫入權限）"""
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        print(f"  ⚠️ 無法更新 {secret_name}：GITHUB_TOKEN 或 GITHUB_REPOSITORY 未設定")
+        return
+
+    try:
+        # Step 1：取得 repo public key（加密用）
+        key_resp = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/public-key",
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=10,
+        )
+        key_resp.raise_for_status()
+        key_data   = key_resp.json()
+        public_key = key_data["key"]
+        key_id     = key_data["key_id"]
+
+        # Step 2：用 libsodium 加密 secret value
+        from base64 import b64encode
+        from nacl import encoding, public as nacl_public
+
+        pk    = nacl_public.PublicKey(public_key.encode(), encoding.Base64Encoder)
+        box   = nacl_public.SealedBox(pk)
+        enc   = b64encode(box.encrypt(secret_value.encode())).decode()
+
+        # Step 3：PUT 更新 secret
+        put_resp = requests.put(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/{secret_name}",
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"encrypted_value": enc, "key_id": key_id},
+            timeout=10,
+        )
+        put_resp.raise_for_status()
+        print(f"  ✅ GitHub Secret {secret_name} 已更新")
+
+    except ImportError:
+        print("  ⚠️ 缺少 PyNaCl，請在 requirements.txt 加上 PyNaCl")
+    except Exception as e:
+        print(f"  ❌ 更新 GitHub Secret {secret_name} 失敗：{e}")
+
+
+# ──────────────────────────────────────────
+# 來源 A：Pinterest API（fallback：CSV）
+# ──────────────────────────────────────────
+def fetch_pinterest_api(max_pins: int = 30, access_token_override: str = "") -> list[dict]:
+    """
+    用 Pinterest API v5 抓自己的 pins
+    先取所有 boards，再逐一抓各 board 的最新 pins
+    """
+    token = access_token_override or PINTEREST_ACCESS_TOKEN
+    if not token:
         return []
 
-    # 超過 8 天未更新則警告
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    # Step 1：取所有 boards
+    try:
+        resp = requests.get(
+            "https://api.pinterest.com/v5/boards",
+            headers=headers,
+            params={"page_size": 50},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        boards = resp.json().get("items", [])
+        print(f"  取得 {len(boards)} 個 boards")
+    except Exception as e:
+        print(f"  ❌ Pinterest boards 失敗：{e}")
+        return []
+
+    # Step 2：逐 board 抓 pins
+    all_pins = []
+    per_board = max(3, max_pins // max(len(boards), 1))
+
+    for board in boards:
+        board_id   = board["id"]
+        board_name = board["name"]
+        try:
+            resp = requests.get(
+                f"https://api.pinterest.com/v5/boards/{board_id}/pins",
+                headers=headers,
+                params={
+                    "page_size": per_board,
+                    "fields": "id,title,description,note,board_id",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            pins = resp.json().get("items", [])
+            for pin in pins:
+                all_pins.append({
+                    "source": "Pinterest",
+                    "title":  (pin.get("title") or "").strip(),
+                    "note":   (pin.get("description") or pin.get("note") or "").strip(),
+                    "board":  board_name,
+                })
+            if len(all_pins) >= max_pins:
+                break
+        except Exception as e:
+            print(f"  ❌ board {board_name} 失敗：{e}")
+            continue
+
+    print(f"  ✅ Pinterest API：{len(all_pins)} 筆 pins")
+    return all_pins[:max_pins]
+
+
+def load_pinterest_csv() -> list[dict]:
+    """CSV fallback：Pinterest API 不可用時使用"""
+    csv_path = Path("data/pinterest.csv")
+    if not csv_path.exists():
+        return []
+
     mtime = datetime.fromtimestamp(csv_path.stat().st_mtime, tz=timezone.utc)
     age_days = (datetime.now(tz=timezone.utc) - mtime).days
     if age_days > 8:
@@ -214,9 +376,34 @@ def load_pinterest_csv() -> list[dict]:
                 "note":  row.get("Note", "").strip(),
                 "board": row.get("Board Name", "").strip(),
             })
-
-    print(f"  讀到 {len(pins)} 筆")
+    print(f"  📁 Pinterest CSV fallback：{len(pins)} 筆")
     return pins
+
+
+def collect_pinterest() -> list[dict]:
+    """
+    優先用 API，access_token 過期時自動 refresh。
+    全部失敗才 fallback 到 CSV。
+    """
+    token = PINTEREST_ACCESS_TOKEN
+
+    if PINTEREST_REFRESH_TOKEN:
+        # 每次執行都先 refresh，確保 token 是新的
+        print("  自動 refresh Pinterest token...")
+        new_token = refresh_pinterest_token()
+        if new_token:
+            token = new_token
+
+    if token:
+        print("  使用 Pinterest API")
+        pins = fetch_pinterest_api(access_token_override=token)
+        if pins:
+            return pins
+        print("  ⚠️ API 失敗，嘗試 CSV fallback...")
+    else:
+        print("  Pinterest token 不可用，使用 CSV")
+
+    return load_pinterest_csv()
 
 
 # ──────────────────────────────────────────
@@ -678,8 +865,8 @@ def send_line(messages: list[dict]):
 def main():
     print("=== 穿搭雷達啟動 ===\n")
 
-    print("[來源 A] Pinterest CSV")
-    pinterest_pins = load_pinterest_csv()
+    print("[來源 A] Pinterest")
+    pinterest_pins = collect_pinterest()
 
     print("\n[來源 B] 穿搭媒體 RSS")
     rss_items = collect_fashion_rss()
