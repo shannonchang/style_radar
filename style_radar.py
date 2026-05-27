@@ -29,7 +29,7 @@ PINTEREST_APP_ID           = os.environ.get("PINTEREST_APP_ID", "")
 PINTEREST_APP_SECRET       = os.environ.get("PINTEREST_APP_SECRET", "")
 PINTEREST_ACCESS_TOKEN     = os.environ.get("PINTEREST_ACCESS_TOKEN", "")
 PINTEREST_REFRESH_TOKEN    = os.environ.get("PINTEREST_REFRESH_TOKEN", "")
-GITHUB_TOKEN               = os.environ.get("GITHUB_TOKEN", "")   # Actions 內建，不用另外加
+PAT_TOKEN                  = os.environ.get("PAT_TOKEN", "")          # Fine-grained PAT，用來寫回 Secrets
 GITHUB_REPOSITORY          = os.environ.get("GITHUB_REPOSITORY", "")  # owner/repo
 
 # YouTube 頻道名稱（用搜尋方式找 channelId，不需要手動維護 ID）
@@ -240,9 +240,9 @@ def refresh_pinterest_token() -> str:
 
 
 def _update_github_secret(secret_name: str, secret_value: str):
-    """透過 GitHub API 更新 Secrets（需要 GITHUB_TOKEN 有 secrets 寫入權限）"""
-    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
-        print(f"  ⚠️ 無法更新 {secret_name}：GITHUB_TOKEN 或 GITHUB_REPOSITORY 未設定")
+    """透過 Fine-grained PAT 加密寫入 GitHub Secrets"""
+    if not PAT_TOKEN or not GITHUB_REPOSITORY:
+        print(f"  ⚠️ 無法更新 {secret_name}：PAT_TOKEN 或 GITHUB_REPOSITORY 未設定")
         return
 
     try:
@@ -250,7 +250,7 @@ def _update_github_secret(secret_name: str, secret_value: str):
         key_resp = requests.get(
             f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/public-key",
             headers={
-                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Authorization": f"Bearer {PAT_TOKEN}",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             timeout=10,
@@ -261,18 +261,18 @@ def _update_github_secret(secret_name: str, secret_value: str):
         key_id     = key_data["key_id"]
 
         # Step 2：用 libsodium 加密 secret value
-        from base64 import b64encode
-        from nacl import encoding, public as nacl_public
+        from base64 import b64decode, b64encode
+        from nacl import public as nacl_public
 
-        pk    = nacl_public.PublicKey(public_key.encode(), encoding.Base64Encoder)
-        box   = nacl_public.SealedBox(pk)
-        enc   = b64encode(box.encrypt(secret_value.encode())).decode()
+        pk  = nacl_public.PublicKey(b64decode(public_key))
+        box = nacl_public.SealedBox(pk)
+        enc = b64encode(box.encrypt(secret_value.encode("utf-8"))).decode("utf-8")
 
-        # Step 3：PUT 更新 secret
+        # Step 3：PUT 加密寫入 Secret
         put_resp = requests.put(
             f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/{secret_name}",
             headers={
-                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Authorization": f"Bearer {PAT_TOKEN}",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             json={"encrypted_value": enc, "key_id": key_id},
@@ -282,7 +282,7 @@ def _update_github_secret(secret_name: str, secret_value: str):
         print(f"  ✅ GitHub Secret {secret_name} 已更新")
 
     except ImportError:
-        print("  ⚠️ 缺少 PyNaCl，請在 requirements.txt 加上 PyNaCl")
+        print("  ⚠️ 缺少 PyNaCl，請執行：pip install PyNaCl")
     except Exception as e:
         print(f"  ❌ 更新 GitHub Secret {secret_name} 失敗：{e}")
 
