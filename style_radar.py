@@ -10,6 +10,7 @@ AI 穿搭靈感雷達 - 每週自動推播
 
 import os
 import csv
+import json
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -50,14 +51,12 @@ HEADERS = {
 }
 
 FASHION_RSS = [
-    ("MEN'S NON-NO", "https://mensnonno.jp/blog/feed"),
-("MEN's FOLIO", "https://mens-folio.com/feed"),
-("GQ Taiwan", "https://www.gq.com.tw/feed"),
-("Yakkun Fashion", "https://yakkun-fashion.jp/feed"),
-("MEN'S NON-NO", "https://www.mensnonno.jp/feed/"),
-    ("Yakkun Fashion", "https://yakkun-fashion.jp/feed/"),
-    ("BEAUTY美人圈", "https://www.beauty321.com/feed"),
-    ("MERY JP", "https://mery.jp/feed"),
+    ("MEN's FOLIO",     "https://mens-folio.com/feed"),
+    ("GQ Taiwan",       "https://www.gq.com.tw/feed"),
+    ("MEN'S NON-NO",    "https://www.mensnonno.jp/feed/"),
+    ("Yakkun Fashion",  "https://yakkun-fashion.jp/feed/"),
+    ("BEAUTY美人圈",    "https://www.beauty321.com/feed"),
+    ("MERY JP",         "https://mery.jp/feed"),
     ("Shopping Design", "https://www.shoppingdesign.com.tw/rss"),
 ]
 
@@ -193,6 +192,68 @@ FALLBACK_QUERIES = {
         "urban effortless women style"
     ]
 }
+
+
+# ──────────────────────────────────────────
+# 歷史記錄（避免每週重複建議）
+# ──────────────────────────────────────────
+HISTORY_PATH = Path("data/history.json")
+MAX_HISTORY_WEEKS = 4
+
+
+def load_history() -> list[dict]:
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            return json.load(f).get("weeks", [])
+    except Exception as e:
+        print(f"  ⚠️ 讀取歷史記錄失敗：{e}")
+        return []
+
+
+def save_history(entry: dict, existing: list[dict]):
+    weeks = [entry] + existing
+    weeks = weeks[:MAX_HISTORY_WEEKS]
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump({"weeks": weeks}, f, ensure_ascii=False, indent=2)
+    print(f"  ✅ 歷史記錄已更新（保留最近 {len(weeks)} 週）")
+
+
+def extract_history_entry(analysis: str) -> dict:
+    """從分析文字中提取本週關鍵段落，存入歷史供下週差異化用"""
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    markers = {"🎯": "signals", "👨": "male", "👩": "female"}
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+
+    for line in analysis.splitlines():
+        s = line.strip()
+        matched = next((v for k, v in markers.items() if s.startswith(k)), None)
+        if matched:
+            current = matched
+            sections.setdefault(current, [])
+        elif s.startswith(("🌡️", "📰", "📐")):
+            current = None
+        elif s and current:
+            sections[current].append(s)
+
+    return {
+        "date":    today,
+        "signals": " ".join(sections.get("signals", []))[:100],
+        "male":    " ".join(sections.get("male",    []))[:120],
+        "female":  " ".join(sections.get("female",  []))[:120],
+    }
+
+
+def format_history_for_prompt(history: list[dict]) -> str:
+    lines = []
+    for w in history:
+        lines.append(
+            f"{w.get('date','')} | 信號：{w.get('signals','')} "
+            f"| 男：{w.get('male','')} | 女：{w.get('female','')}"
+        )
+    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────
@@ -677,7 +738,7 @@ def build_dalle_prompt(gender: str, style_desc: str) -> str:
 # ──────────────────────────────────────────
 # Claude 分析
 # ──────────────────────────────────────────
-def build_prompt(pinterest_pins: list[dict], rss_items: list[dict], youtube_videos: list[dict] = None) -> str:
+def build_prompt(pinterest_pins: list[dict], rss_items: list[dict], youtube_videos: list[dict] = None, history: list[dict] = None) -> str:
     sections = []
 
     if pinterest_pins:
@@ -701,6 +762,14 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict], youtube_vide
 
     combined = "\n\n".join(sections) if sections else "（本週沒有任何資料）"
 
+    history_block = ""
+    if history:
+        history_block = f"""
+【過去 {len(history)} 週建議摘要（請主動差異化，避免重複以下關鍵字與單品組合）】
+{format_history_for_prompt(history)}
+
+"""
+
     return f"""你是台灣在地穿搭顧問，同時熟悉男生和女生的穿搭趨勢。
 
 【風格偏好】
@@ -712,7 +781,7 @@ def build_prompt(pinterest_pins: list[dict], rss_items: list[dict], youtube_vide
 【穿搭輸出規則】
 {OUTFIT_RULES}
 
-以下是這週的穿搭資料：
+{history_block}以下是這週的穿搭資料：
 {combined}
 
 請用繁體中文回答，格式如下：
@@ -775,6 +844,10 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict], youtu
     if not pinterest_pins and not rss_items and not youtube_videos:
         return "本週三個來源都沒有資料，請確認 Pinterest CSV 是否放入 data/ 資料夾、YOUTUBE_API_KEY 是否設定。", "", "", "", ""
 
+    history = load_history()
+    if history:
+        print(f"  📚 載入歷史記錄 {len(history)} 週")
+
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -785,13 +858,18 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict], youtu
         json={
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 700,
-            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items, youtube_videos)}],
+            "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items, youtube_videos, history)}],
         },
         timeout=30,
     )
     resp.raise_for_status()
     raw = resp.json()["content"][0]["text"]
-    return parse_analysis(raw)
+    result = parse_analysis(raw)
+
+    print("  💾 儲存本週記錄...")
+    save_history(extract_history_entry(result[0]), history)
+
+    return result
 
 
 # ──────────────────────────────────────────
