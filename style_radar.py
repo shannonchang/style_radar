@@ -678,7 +678,7 @@ def _call_gpt_image(dalle_prompt: str) -> dict:
 
 def generate_dalle_image(dalle_prompt: str) -> str | None:
     try:
-        import base64, tempfile, os as _os
+        import base64
         # 最多 retry 一次
         try:
             data = _call_gpt_image(dalle_prompt)
@@ -856,7 +856,7 @@ def analyze_with_claude(pinterest_pins: list[dict], rss_items: list[dict], youtu
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
             "max_tokens": 700,
             "messages": [{"role": "user", "content": build_prompt(pinterest_pins, rss_items, youtube_videos, history)}],
         },
